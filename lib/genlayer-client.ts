@@ -12,7 +12,7 @@ export const explorerBase = "https://explorer-bradbury.genlayer.com";
 
 export function requireContractAddress() {
   if (!contractAddress) {
-    throw new Error("Deploy ChallengePool v2 and set NEXT_PUBLIC_CHALLENGE_POOL_ADDRESS. The bundled Bradbury deployment is the pre-fix v1 contract.");
+    throw new Error("ChallengePool v2 address is not configured. Set NEXT_PUBLIC_CHALLENGE_POOL_ADDRESS or provide a valid v2 deployment in deployment/bradbury.json.");
   }
   return contractAddress;
 }
