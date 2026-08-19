@@ -63,9 +63,11 @@ pip install -r requirements-dev.txt
 cp .env.example .env.local
 ```
 
-### Important: redeploy v2
+### Bradbury deployment
 
-The bundled `deployment/bradbury.json` is intentionally marked `contractVersion: 1`; it points to the pre-fix contract and does not expose the new indexes/safety state machine. Deploy `contracts/challenge_pool.py` again, then put the new address in:
+The bundled `deployment/bradbury.json` points to the current ChallengePool v2 deployment on Bradbury.
+
+The frontend uses that bundled v2 address automatically. To override it manually, set:
 
 ```bash
 NEXT_PUBLIC_CHALLENGE_POOL_ADDRESS=0xYOUR_V2_ADDRESS
@@ -77,7 +79,7 @@ Then run:
 npm run dev
 ```
 
-Do not point the patched frontend at the v1 address: `get_challenge_ids`, `get_submission_ids`, `RETRYABLE`, and expiry handling exist only in v2.
+ChallengePool v2 includes contract-derived challenge/submission indexes, REQUIRED criteria enforcement, RETRYABLE adjudication state, and safe expiry/refund handling.
 
 ## Verify
 
