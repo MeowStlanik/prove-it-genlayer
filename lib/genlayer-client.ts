@@ -6,12 +6,13 @@ import { ExecutionResult, TransactionStatus } from "genlayer-js/types";
 import type { TransactionHash } from "genlayer-js/types";
 import bradburyDeployment from "@/deployment/bradbury.json";
 
-export const contractAddress = (process.env.NEXT_PUBLIC_CHALLENGE_POOL_ADDRESS || bradburyDeployment.contractAddress) as `0x${string}`;
+const bundledAddress = bradburyDeployment.contractVersion === 2 ? bradburyDeployment.contractAddress : "";
+export const contractAddress = (process.env.NEXT_PUBLIC_CHALLENGE_POOL_ADDRESS || bundledAddress) as `0x${string}`;
 export const explorerBase = "https://explorer-bradbury.genlayer.com";
 
 export function requireContractAddress() {
   if (!contractAddress) {
-    throw new Error("The ChallengePool deployment address is not configured yet.");
+    throw new Error("Deploy ChallengePool v2 and set NEXT_PUBLIC_CHALLENGE_POOL_ADDRESS. The bundled Bradbury deployment is the pre-fix v1 contract.");
   }
   return contractAddress;
 }
@@ -71,12 +72,16 @@ export async function restoreWallet() {
 }
 
 export async function waitForAccepted(hash: `0x${string}`) {
-  return readClient.waitForTransactionReceipt({
+  const receipt = await readClient.waitForTransactionReceipt({
     hash: hash as TransactionHash,
     status: TransactionStatus.ACCEPTED,
     interval: 5_000,
     retries: 24,
   });
+  if (receipt.txExecutionResultName && receipt.txExecutionResultName !== ExecutionResult.FINISHED_WITH_RETURN) {
+    throw new Error(`Transaction was accepted with ${receipt.txExecutionResultName}.`);
+  }
+  return receipt;
 }
 
 export async function waitForFinalized(hash: `0x${string}`) {

@@ -4,7 +4,7 @@ Prove It uses GenLayer consensus twice, for different questions.
 
 ## 1. Rubric formalization
 
-`draft_challenge` uses GenLayer's native `prompt_non_comparative` principle to convert natural-language rules into 2–6 weighted criteria totaling 100. Validators inspect that concrete proposal against the original rules and accept only when it covers all material obligations, flags unverifiable claims, invents nothing, and preserves relative importance. Deterministic invariants reject malformed output after consensus. This avoids requiring two generative rubrics to be textually or structurally identical.
+`draft_challenge` uses GenLayer's native `prompt_non_comparative` principle to convert natural-language rules into 2–6 weighted criteria totaling 100. Validators inspect that concrete proposal against the original rules and accept only when it covers all material obligations, flags unverifiable claims, invents nothing, and preserves relative importance. Deterministic invariants reject malformed output after consensus and require at least one `REQUIRED` item.
 
 The contract stores `NEEDS_REVISION` when any requirement cannot be checked from public evidence. Otherwise it stores `DRAFT`. Funding remains closed until the creator calls `confirm_challenge`; this makes the reviewed checklist immutable.
 
@@ -16,8 +16,27 @@ The assessment uses a second native `prompt_non_comparative` principle whose inp
 
 An empty synthetic anchor must always score zero. It catches a leader that marks unsupported criteria as met.
 
-## Settlement and appeals
+## Eligibility is stricter than score
 
-Settlement is deterministic after consensus: first passing proof, best score at deadline, or score-proportional split. There is no application-level dispute court. Users appeal the verdict transaction through GenLayer’s native appeal mechanism.
+`_resolve` applies two deterministic gates to every submission:
 
-Payouts and refunds are external EVM messages. They execute only when the verdict transaction is finalized, so an accepted result can still be appealed without an irreversible transfer.
+1. weighted `score >= min_score`, and
+2. every rubric item whose kind is `REQUIRED` must be `MET`.
+
+A high quality score therefore cannot compensate for a missing mandatory requirement.
+
+## Safe incomplete adjudication
+
+A temporary fetch/render failure can make a rubric item `UNVERIFIABLE`. Treating that as `NOT_MET` could incorrectly refund contributors; ignoring it could incorrectly pay a winner or rank competitors. v2 takes the conservative path: if any real submission has an `UNVERIFIABLE` item, the verdict is stored with reason `UNVERIFIABLE_EVIDENCE`, status becomes `RETRYABLE`, and no external transfer is scheduled.
+
+Anyone can retry the same immutable submission set. For `FIRST_PASS`, if this happens before deadline the challenge can still receive new submissions; a new proof clears the stale retryable verdict and reopens normal adjudication.
+
+## Failure, expiry, settlement and appeals
+
+- A complete `FIRST_PASS` adjudication that finds no eligible proof **before deadline** stays `OPEN`; it does not prematurely unlock refunds.
+- A complete terminal adjudication with no eligible proof becomes `REFUNDABLE`.
+- An expired challenge with zero submissions can become `REFUNDABLE` immediately after deadline.
+- An expired challenge with submissions can become `REFUNDABLE` after a seven-day adjudication grace period if no safe settlement completed.
+- A verdict with payouts becomes `RESOLVED`; payout external messages execute only when the transaction finalizes.
+
+There is no application-level dispute court. Users appeal the verdict transaction through GenLayer's native appeal mechanism.

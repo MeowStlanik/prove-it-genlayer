@@ -1,10 +1,11 @@
 {
-  "network": "Bradbury",
-  "networkKey": "testnet_bradbury",
-  "chainId": 4221,
-  "contractAddress": "0x0Bff8ec1c5e416457e04fEe9beE3f935B0A7AD62",
-  "deploymentTransaction": "0xf9774eb29eadc596715732de654298672b3cc9161422097392401373f2474466",
-  "contractSha256": "03acaf8ad887dcffeed5b3e2af3a83c458403d3d257dc8d16593c242114e092a",
-  "deployedAt": "2026-08-17T06:24:32.012Z",
-  "explorer": "https://explorer-bradbury.genlayer.com/address/0x0Bff8ec1c5e416457e04fEe9beE3f935B0A7AD62"
+    "network":  "Bradbury",
+    "networkKey":  "testnet_bradbury",
+    "chainId":  4221,
+    "contractAddress":  "0x3c08e86b31390BBEd5e04b0f3E6327a96c24DBFD",
+    "deploymentTransaction":  "0x8cdb8b1a093754e286fbe68425928271c21da51a1ecb20a6697d9c37dc571db5",
+    "contractSha256":  "612744d039123f9c8eebd37afbfa54f858b0d63591af3e67859934ecb5690f50",
+    "deployedAt":  "2026-08-19T08:32:29.8327944Z",
+    "explorer":  "https://explorer-bradbury.genlayer.com/address/0x3c08e86b31390BBEd5e04b0f3E6327a96c24DBFD",
+    "contractVersion":  2
 }

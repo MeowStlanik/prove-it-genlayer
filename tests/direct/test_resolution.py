@@ -4,7 +4,15 @@ from tests.direct.conftest import confirm, deploy_draft, submit
 def _assessment(*pairs):
     return {
         "submissions": [
-            {"id": submission_id, "items": [], "score": score, "summary": "ok"}
+            {
+                "id": submission_id,
+                "items": [
+                    {"id": "published", "status": "MET", "evidence": "ok"},
+                    {"id": "depth", "status": "MET", "evidence": "ok"},
+                ],
+                "score": score,
+                "summary": "ok",
+            }
             for submission_id, score in pairs
         ]
     }

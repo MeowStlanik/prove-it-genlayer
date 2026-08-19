@@ -31,7 +31,7 @@ def test_native_assessment_consensus_accepts_supported_proposal(
     submit(direct_vm, contract, direct_bob)
     direct_vm.clear_mocks()
     register_judge_mocks(direct_vm)
-    contract.judge("article_challenge", json.dumps(["proof_1"]))
+    contract.judge("article_challenge")
     assert contract.get_challenge("article_challenge")["verdict"]["assessment"][0]["score"] == 60
 
 
@@ -44,7 +44,7 @@ def test_native_assessment_consensus_rejects_malformed_result(
     direct_vm.clear_mocks()
     register_judge_mocks(direct_vm, json.dumps({"submissions": []}))
     with pytest.raises(Exception):
-        contract.judge("article_challenge", json.dumps(["proof_1"]))
+        contract.judge("article_challenge")
 
 
 def test_native_assessment_consensus_rejects_hallucinating_anchor(
@@ -59,16 +59,32 @@ def test_native_assessment_consensus_rejects_hallucinating_anchor(
     direct_vm.clear_mocks()
     register_judge_mocks(direct_vm, json.dumps(bad))
     with pytest.raises(Exception):
-        contract.judge("article_challenge", json.dumps(["proof_1"]))
+        contract.judge("article_challenge")
 
 
-def test_failed_threshold_becomes_refundable(direct_vm, direct_deploy, direct_alice, direct_bob):
+def test_failed_first_pass_stays_open_before_deadline(direct_vm, direct_deploy, direct_alice, direct_bob):
     contract = deploy_draft(direct_vm, direct_deploy, direct_alice, mode="FIRST_PASS", min_score=70)
     confirm(direct_vm, contract, direct_alice)
     submit(direct_vm, contract, direct_bob)
     direct_vm.clear_mocks()
     register_judge_mocks(direct_vm, assessment_result(score=60))
-    contract.judge("article_challenge", json.dumps(["proof_1"]))
+    contract.judge("article_challenge")
+    challenge = contract.get_challenge("article_challenge")
+    assert challenge["status"] == "OPEN"
+    assert challenge["verdict"]["payouts"] == []
+    assert challenge["verdict"]["reason"] == "NO_ELIGIBLE_YET"
+
+
+def test_failed_first_pass_becomes_refundable_after_deadline(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    contract = deploy_draft(direct_vm, direct_deploy, direct_alice, mode="FIRST_PASS", min_score=70)
+    confirm(direct_vm, contract, direct_alice)
+    submit(direct_vm, contract, direct_bob)
+    direct_vm.warp("2026-01-01T01:00:01Z")
+    direct_vm.clear_mocks()
+    register_judge_mocks(direct_vm, assessment_result(score=60))
+    contract.judge("article_challenge")
     challenge = contract.get_challenge("article_challenge")
     assert challenge["status"] == "REFUNDABLE"
     assert challenge["verdict"]["payouts"] == []

@@ -13,6 +13,7 @@ MAX_PROOF_CHARS = 24_000
 MIN_RULES_CHARS = 40
 MIN_DEADLINE_SECONDS = 300
 MAX_DEADLINE_SECONDS = 90 * 24 * 60 * 60
+ADJUDICATION_GRACE_SECONDS = 7 * 24 * 60 * 60
 MIN_INITIAL_POOL = 10**15  # 0.001 GEN
 ANCHOR_ID = "__anchor_empty__"
 
@@ -72,6 +73,7 @@ def _validate_checklist_data(data: object) -> bool:
         return False
     seen = set()
     total_weight = 0
+    required_count = 0
     for item in checklist:
         if not isinstance(item, dict):
             return False
@@ -87,9 +89,11 @@ def _validate_checklist_data(data: object) -> bool:
             return False
         if kind not in ("REQUIRED", "QUALITY"):
             return False
+        if kind == "REQUIRED":
+            required_count += 1
         seen.add(item_id)
         total_weight += weight
-    return total_weight == 100
+    return total_weight == 100 and required_count >= 1
 
 
 def _validate_assessment_data(data: object, submission_ids: list, checklist: list) -> bool:
@@ -148,7 +152,9 @@ class ChallengePool(gl.Contract):
     """Crowdfunded competitive challenges with consensus adjudication."""
 
     challenges: TreeMap[str, Challenge]
+    challenge_ids: DynArray[str]
     submissions: TreeMap[str, Submission]
+    submission_ids: TreeMap[str, str]
     contributions: TreeMap[str, u256]
     refund_claimed: TreeMap[str, bool]
     completed: TreeMap[str, u256]
@@ -174,6 +180,9 @@ class ChallengePool(gl.Contract):
 
     def _submission_key(self, challenge_id: str, submission_id: str) -> str:
         return challenge_id + "::submission::" + submission_id
+
+    def _submission_index_key(self, challenge_id: str, index: int) -> str:
+        return challenge_id + "::submission-index::" + str(index)
 
     def _address_key(self, challenge_id: str, address: Address, label: str) -> str:
         return challenge_id + "::" + label + "::" + address.as_hex.lower()
@@ -232,12 +241,13 @@ criteria. Return only compact JSON with this schema:
 "kind":"REQUIRED"}}],"unverifiable":[]}}
 Weights are integers totaling 100. kind is REQUIRED or QUALITY. Put every
 material rule that public immutable web evidence cannot prove in unverifiable.
+At least one criterion must be REQUIRED.
 """,
             criteria=f"""
 RUBRIC_VALIDATION_CRITERIA_V3
 The output must be valid JSON in the exact requested schema, contain 2..{MAX_CHECKLIST_ITEMS}
 unique criteria, use integer weights from 5 to 80 totaling 100, and use only
-REQUIRED or QUALITY. Criteria must collectively cover every material verifiable
+REQUIRED or QUALITY with at least one REQUIRED item. Criteria must collectively cover every material verifiable
 obligation in the input, preserve relative importance, be independently
 judgeable from a submitted immutable snapshot, invent nothing, and not presume
 the outcome. Every material private, vague, or otherwise publicly unverifiable
@@ -321,15 +331,53 @@ anchor has no MET items and score 0.
 
     def _resolve(self, challenge: Challenge, assessment: dict, submissions: list) -> dict:
         by_id = {item["id"]: item for item in assessment["submissions"]}
+        checklist = json.loads(challenge.checklist_json)
+        required_ids = [item["id"] for item in checklist if item["kind"] == "REQUIRED"]
+        submitted_at_by_id = {item.id: int(item.submitted_at) for item in submissions}
+        has_unverifiable = False
         eligible = []
+        ranking = []
         for submission in submissions:
-            score = by_id[submission.id]["score"]
-            if score >= int(challenge.min_score):
+            result = by_id[submission.id]
+            score = result["score"]
+            statuses = {item["id"]: item["status"] for item in result["items"]}
+            required_met = all(statuses.get(item_id) == "MET" for item_id in required_ids)
+            if any(item["status"] == "UNVERIFIABLE" for item in result["items"]):
+                has_unverifiable = True
+            passes = score >= int(challenge.min_score) and required_met
+            ranking.append(
+                {
+                    "submission_id": submission.id,
+                    "score": score,
+                    "required_met": required_met,
+                    "eligible": passes,
+                }
+            )
+            if passes:
                 eligible.append((submission, score))
 
         eligible.sort(key=lambda item: (-item[1], int(item[0].submitted_at), item[0].id))
+        ranking.sort(
+            key=lambda item: (
+                -item["score"],
+                submitted_at_by_id[item["submission_id"]],
+                item["submission_id"],
+            )
+        )
         payouts = []
         pool = int(challenge.pool)
+        # Any unavailable rubric item can change eligibility or ranking. Keep funds
+        # escrowed and allow a retry instead of paying or refunding on incomplete
+        # evidence.
+        if has_unverifiable:
+            return {
+                "assessment": assessment["submissions"],
+                "ranking": ranking,
+                "payouts": [],
+                "reason": "UNVERIFIABLE_EVIDENCE",
+                "retryable": True,
+            }
+
         if challenge.mode == "FIRST_PASS" and eligible:
             earliest = sorted(eligible, key=lambda item: (int(item[0].submitted_at), item[0].id))[0]
             payouts.append({"submission_id": earliest[0].id, "recipient": earliest[0].submitter.as_hex, "amount": pool})
@@ -344,8 +392,13 @@ anchor has no MET items and score 0.
                 allocated += amount
                 payouts.append({"submission_id": item[0].id, "recipient": item[0].submitter.as_hex, "amount": amount})
 
-        ranking = [{"submission_id": item[0].id, "score": item[1]} for item in eligible]
-        return {"assessment": assessment["submissions"], "ranking": ranking, "payouts": payouts}
+        return {
+            "assessment": assessment["submissions"],
+            "ranking": ranking,
+            "payouts": payouts,
+            "reason": "PAID" if payouts else "NO_ELIGIBLE_SUBMISSION",
+            "retryable": False,
+        }
 
     @gl.public.write
     def draft_challenge(
@@ -390,6 +443,7 @@ anchor has no MET items and score 0.
             u256(0),
             u256(0),
         )
+        self.challenge_ids.append(challenge_id)
         self.challenge_count = self.challenge_count + u256(1)
 
     @gl.public.write.payable
@@ -406,13 +460,14 @@ anchor has no MET items and score 0.
         challenge.status = "OPEN"
         challenge.pool = gl.message.value
         challenge.confirmed_at = u256(self._now())
+        challenge.verdict_json = ""
         key = self._address_key(challenge_id, gl.message.sender_address, "funder")
         self.contributions[key] = gl.message.value
 
     @gl.public.write.payable
     def fund(self, challenge_id: str) -> None:
         challenge = self._require_challenge(challenge_id)
-        if challenge.status != "OPEN":
+        if challenge.status not in ("OPEN", "RETRYABLE"):
             raise gl.vm.UserError("challenge is not open")
         if self._now() >= int(challenge.deadline):
             raise gl.vm.UserError("challenge deadline passed")
@@ -434,7 +489,7 @@ anchor has no MET items and score 0.
         note: str,
     ) -> None:
         challenge = self._require_challenge(challenge_id)
-        if challenge.status != "OPEN":
+        if challenge.status not in ("OPEN", "RETRYABLE"):
             raise gl.vm.UserError("challenge is not open")
         if self._now() > int(challenge.deadline):
             raise gl.vm.UserError("submission deadline passed")
@@ -453,7 +508,9 @@ anchor has no MET items and score 0.
         if len(note) > 500:
             raise gl.vm.UserError("note is too long")
 
+        next_index = int(challenge.submission_count)
         challenge.submission_count = challenge.submission_count + u256(1)
+        self.submission_ids[self._submission_index_key(challenge_id, next_index)] = submission_id
         self.submissions[key] = Submission(
             challenge_id,
             submission_id,
@@ -464,29 +521,26 @@ anchor has no MET items and score 0.
             note,
             u256(self._now()),
         )
+        if challenge.verdict_json:
+            challenge.verdict_json = ""
+            challenge.judged_at = u256(0)
+        if challenge.status == "RETRYABLE":
+            challenge.status = "OPEN"
 
     @gl.public.write
-    def judge(self, challenge_id: str, submission_ids_json: str) -> None:
+    def judge(self, challenge_id: str) -> None:
         challenge = self._require_challenge(challenge_id)
-        if challenge.status != "OPEN":
-            raise gl.vm.UserError("challenge is not open")
+        if challenge.status not in ("OPEN", "RETRYABLE"):
+            raise gl.vm.UserError("challenge is not adjudicatable")
         if challenge.mode != "FIRST_PASS" and self._now() <= int(challenge.deadline):
             raise gl.vm.UserError("deadline has not passed")
-        try:
-            submission_ids = json.loads(submission_ids_json)
-        except Exception:
-            raise gl.vm.UserError("submission_ids_json must be valid JSON")
-        if not isinstance(submission_ids, list) or len(submission_ids) < 1 or len(submission_ids) > MAX_SUBMISSIONS:
+        submission_count = int(challenge.submission_count)
+        if submission_count < 1 or submission_count > MAX_SUBMISSIONS:
             raise gl.vm.UserError("submission id count must be 1..8")
-        if len(submission_ids) != int(challenge.submission_count):
-            raise gl.vm.UserError("all submissions must be judged together")
-        if len(set(submission_ids)) != len(submission_ids):
-            raise gl.vm.UserError("duplicate submission id")
 
         submissions = []
-        for submission_id in submission_ids:
-            if not isinstance(submission_id, str):
-                raise gl.vm.UserError("submission ids must be strings")
+        for index in range(submission_count):
+            submission_id = self.submission_ids[self._submission_index_key(challenge_id, index)]
             key = self._submission_key(challenge_id, submission_id)
             if key not in self.submissions:
                 raise gl.vm.UserError("submission not found")
@@ -496,6 +550,19 @@ anchor has no MET items and score 0.
         verdict = self._resolve(challenge, assessment, submissions)
         challenge.verdict_json = json.dumps(verdict, sort_keys=True)
         challenge.judged_at = u256(self._now())
+        if verdict["retryable"]:
+            challenge.status = "RETRYABLE"
+            return
+
+        # FIRST_PASS can be adjudicated before the deadline. A proof that fails
+        # completely must not end the whole challenge or unlock contributor
+        # refunds while later competitors are still allowed to submit.
+        if not verdict["payouts"] and challenge.mode == "FIRST_PASS" and self._now() <= int(challenge.deadline):
+            verdict["reason"] = "NO_ELIGIBLE_YET"
+            challenge.verdict_json = json.dumps(verdict, sort_keys=True)
+            challenge.status = "OPEN"
+            return
+
         challenge.status = "RESOLVED" if verdict["payouts"] else "REFUNDABLE"
 
         # External messages execute only when this verdict transaction finalizes,
@@ -518,10 +585,44 @@ anchor has no MET items and score 0.
                 self.failed[rep_key] = prior_failed + u256(1)
 
     @gl.public.write
+    def expire_challenge(self, challenge_id: str) -> None:
+        challenge = self._require_challenge(challenge_id)
+        if challenge.status not in ("OPEN", "RETRYABLE"):
+            raise gl.vm.UserError("challenge cannot expire from its current state")
+
+        now = self._now()
+        deadline = int(challenge.deadline)
+        if now <= deadline:
+            raise gl.vm.UserError("challenge deadline has not passed")
+
+        # With no submissions there is nothing to adjudicate, so contributors can
+        # recover funds as soon as the deadline passes. With submissions, keep a
+        # bounded grace period for permissionless adjudication/retries before the
+        # safest fallback becomes a refund.
+        if int(challenge.submission_count) > 0 and now <= deadline + ADJUDICATION_GRACE_SECONDS:
+            raise gl.vm.UserError("adjudication grace period is still open")
+
+        challenge.status = "REFUNDABLE"
+        challenge.verdict_json = json.dumps(
+            {
+                "assessment": [],
+                "ranking": [],
+                "payouts": [],
+                "reason": "EXPIRED_WITHOUT_SETTLEMENT",
+                "retryable": False,
+            },
+            sort_keys=True,
+        )
+
+    @gl.public.write
     def claim_refund(self, challenge_id: str) -> None:
         challenge = self._require_challenge(challenge_id)
         if challenge.status != "REFUNDABLE":
             raise gl.vm.UserError("challenge is not refundable")
+        if challenge.verdict_json:
+            verdict = json.loads(challenge.verdict_json)
+            if isinstance(verdict, dict) and verdict.get("payouts"):
+                raise gl.vm.UserError("challenge has a payout and cannot be refunded")
         contribution_key = self._address_key(challenge_id, gl.message.sender_address, "funder")
         amount = self.contributions[contribution_key] if contribution_key in self.contributions else u256(0)
         if int(amount) == 0:
@@ -544,6 +645,7 @@ anchor has no MET items and score 0.
             "mode": item.mode,
             "min_score": int(item.min_score),
             "deadline": int(item.deadline),
+            "expiry_at": int(item.deadline) + ADJUDICATION_GRACE_SECONDS,
             "status": item.status,
             "pool": int(item.pool),
             "submission_count": int(item.submission_count),
@@ -570,6 +672,18 @@ anchor has no MET items and score 0.
         }
 
     @gl.public.view
+    def get_challenge_ids(self) -> list:
+        return [challenge_id for challenge_id in self.challenge_ids]
+
+    @gl.public.view
+    def get_submission_ids(self, challenge_id: str) -> list:
+        challenge = self._require_challenge(challenge_id)
+        return [
+            self.submission_ids[self._submission_index_key(challenge_id, index)]
+            for index in range(int(challenge.submission_count))
+        ]
+
+    @gl.public.view
     def contribution_of(self, challenge_id: str, funder: str) -> int:
         address = Address(funder)
         key = self._address_key(challenge_id, address, "funder")
@@ -587,8 +701,10 @@ anchor has no MET items and score 0.
     @gl.public.view
     def get_stats(self) -> dict:
         return {
+            "contract_version": 2,
             "challenge_count": int(self.challenge_count),
             "max_checklist_items": MAX_CHECKLIST_ITEMS,
             "max_submissions": MAX_SUBMISSIONS,
             "min_initial_pool_wei": MIN_INITIAL_POOL,
+            "adjudication_grace_seconds": ADJUDICATION_GRACE_SECONDS,
         }
